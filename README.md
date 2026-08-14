@@ -177,7 +177,7 @@ void loop() {
 ---
 
 ## 📁 Included Examples
-Available in Arduino IDE under **File -> Examples -> AyresTimer**:
+All examples include dual implementation for **PlatformIO (`main.cpp`)** and **Arduino IDE (`.ino`)**:
 - `01_BasicSoftwareTimer`: LED blinking and One-Shot delayed executions.
 - `02_HardwarePrecisionTimer`: Silicon timer groups, real-time pause and resume.
 - `03_RetriggerableWatchdog`: Sensor activity watchdog and dynamic retriggering.

@@ -177,7 +177,7 @@ void loop() {
 ---
 
 ## 📁 Ejemplos Incluidos en el Paquete
-Disponibles en Arduino IDE bajo **Archivo -> Ejemplos -> AyresTimer**:
+Todos los ejemplos incluyen implementación dual para **PlatformIO (`main.cpp`)** y **Arduino IDE (`.ino`)**:
 - `01_BasicSoftwareTimer`: Parpadeo de LED y temporizadores One-Shot.
 - `02_HardwarePrecisionTimer`: Grupos de timers en silicio, pausas y reanudaciones.
 - `03_RetriggerableWatchdog`: Detección de presencia y rearme dinámico de zonas.
