@@ -1,0 +1,53 @@
+{
+  "name": "AyresTimer",
+  "version": "4.1.0",
+  "description": "Librería profesional de temporización de misión crítica para ESP32 desarrollada por AyresNet. Temporizadores de 64 bits por Hardware (TG0/TG1) y Software (esp_timer), despacho seguro en FreeRTOS Tasks / ISR, telemetría de jitter, pausas, tiempo restante y módulos ligeros de timeout.",
+  "keywords": [
+    "timer",
+    "esp32",
+    "ayresnet",
+    "freertos",
+    "hardware-timer",
+    "esp-timer",
+    "watchdog",
+    "non-blocking",
+    "telemetry",
+    "stopwatch",
+    "precision"
+  ],
+  "authors": [
+    {
+      "name": "AyresNet",
+      "url": "https://ayresnet.com",
+      "maintainer": true
+    }
+  ],
+  "homepage": "https://ayresnet.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ayresnet/AyresTimer.git"
+  },
+  "license": "MIT",
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
+  "headers": [
+    "AyresTimer.h"
+  ],
+  "export": {
+    "include": [
+      "src/*",
+      "examples/*",
+      "library.json",
+      "library.properties",
+      "keywords.txt",
+      "README.md",
+      "LICENSE"
+    ]
+  },
+  "examples": "examples/*/*.ino"
+}

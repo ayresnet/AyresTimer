@@ -1,0 +1,75 @@
+#######################################
+# Syntax Highlighting For AyresTimer
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+AyresTimer	KEYWORD1
+AyresTimerHW	KEYWORD1
+AyresTimerSW	KEYWORD1
+AyresTimeout	KEYWORD1
+AyresStopwatch	KEYWORD1
+TimerStats	KEYWORD1
+AyresTimerMode	KEYWORD1
+TimerMode	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+start	KEYWORD2
+stop	KEYWORD2
+restart	KEYWORD2
+pause	KEYWORD2
+resume	KEYWORD2
+retrigger	KEYWORD2
+oneShot	KEYWORD2
+periodic	KEYWORD2
+retriggerable	KEYWORD2
+startMs	KEYWORD2
+oneShotMs	KEYWORD2
+periodicMs	KEYWORD2
+retriggerableMs	KEYWORD2
+startSec	KEYWORD2
+oneShotSec	KEYWORD2
+periodicSec	KEYWORD2
+retriggerableSec	KEYWORD2
+updatePeriod	KEYWORD2
+elapsed	KEYWORD2
+elapsedMs	KEYWORD2
+elapsedSec	KEYWORD2
+remaining	KEYWORD2
+remainingMs	KEYWORD2
+remainingSec	KEYWORD2
+progress	KEYWORD2
+isRunning	KEYWORD2
+isPaused	KEYWORD2
+isExpired	KEYWORD2
+setCallback	KEYWORD2
+setISRCallback	KEYWORD2
+useTask	KEYWORD2
+lastError	KEYWORD2
+lastErrorStr	KEYWORD2
+getStats	KEYWORD2
+resetStats	KEYWORD2
+setClockDivisor	KEYWORD2
+setDispatchInISR	KEYWORD2
+cpuFreqMHz	KEYWORD2
+cycles	KEYWORD2
+busyWaitCycles	KEYWORD2
+busyWaitUs	KEYWORD2
+micros64	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+AYRES_HARDWARE	LITERAL1
+AYRES_SOFTWARE	LITERAL1
+ONE_SHOT	LITERAL1
+PERIODIC	LITERAL1
+RETRIGGERABLE	LITERAL1
+AYRES_TIMER_AUTO_CORE	LITERAL1
+TG0	LITERAL1
+TG1	LITERAL1
+T0	LITERAL1
+T1	LITERAL1
