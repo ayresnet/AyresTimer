@@ -2,7 +2,10 @@
 
 #include "AyresTimer.h"
 
+#include <driver/timer.h>
 #include <esp32/clk.h>
+#include <esp_err.h>
+#include <esp_attr.h>
 #include <stdio.h>
 #include <string.h>
 

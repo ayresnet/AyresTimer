@@ -2,6 +2,9 @@
 
 #include "AyresTimer.h"
 
+#include <esp_timer.h>
+#include <esp_err.h>
+#include <esp_attr.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
