@@ -5,9 +5,9 @@
 [![Idioma: Español](https://img.shields.io/badge/Idioma-Espa%C3%B1ol-yellow.svg)](#)
 [![Read in English](https://img.shields.io/badge/Documentation-English-blue.svg)](README.md)
 [![Repositorio GitHub](https://img.shields.io/badge/GitHub-ayresnet%2FAyresTimer-181717.svg?logo=github)](https://github.com/ayresnet/AyresTimer)
-[![PlatformIO Registry](https://badges.registry.platformio.org/packages/ayresnet/library/AyresTimer.svg)](https://registry.platformio.org/)
-[![Arduino Library](https://img.shields.io/badge/Arduino-Library%20Manager-teal.svg)](https://www.arduino.cc/reference/en/libraries/)
-[![Sitio Web](https://img.shields.io/badge/Sitio%20Web-AyresNet.com-blue.svg)](https://ayresnet.com)
+[![PlatformIO Registry](https://img.shields.io/badge/PlatformIO-Registry-orange.svg?logo=platformio)](https://registry.platformio.org/)
+[![Arduino Library](https://img.shields.io/badge/Arduino-Library%20Manager-00979D.svg?logo=arduino)](https://www.arduino.cc/reference/en/libraries/)
+[![Sitio Web](https://img.shields.io/badge/Sitio%20Web-AyresNet.com-0052CC.svg)](https://ayresnet.com)
 [![Framework](https://img.shields.io/badge/Framework-Arduino%20%7C%20ESP--IDF-blue.svg)](https://espressif.github.io/arduino-esp32/)
 [![Licencia: MIT](https://img.shields.io/badge/Licencia-MIT-yellow.svg)](LICENSE)
 
