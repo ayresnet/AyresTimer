@@ -4,3 +4,6 @@ compile_commands.json
 *.bin
 *.elf
 *.o
+
+# Banco de pruebas local (no se incluye en la distribución de la librería)
+src/main.cpp

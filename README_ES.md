@@ -37,16 +37,21 @@
 
 ---
 
-## 📊 Comparativa Técnica: `millis()` vs `AyresTimer`
+## 📊 Gran Comparativa Técnica: `delay()` vs `millis()` vs `AyresTimerSW` vs `AyresTimerHW`
 
-| Característica | Polling tradicional con `millis()` | Suite Profesional `AyresTimer` |
-| :--- | :--- | :--- |
-| **Resolución Temporal** | 1 milisegundo | **1 microsegundo (`uint64_t`)** |
-| **Desbordamiento (*Rollover*)** | Cada 49.7 días (provoca cuelgues si no se gestiona) | **Inmune** (> 500.000 años) |
-| **Carga en la CPU** | Bucle continuo de comprobación en `loop()` | **0% polling** (basado en eventos e interrupciones) |
-| **Jitter / Retraso** | Alto (depende de lo que tarde el `loop()`) | **Sub-microsegundo / Sin retraso acumulativo** |
-| **Seguridad Multihilo / Multicore** | Inseguro | **Totalmente Thread-Safe** (Mutex recursivo + Spinlocks) |
-| **Inspección de Estado** | Manual con variables globales | `pause()`, `resume()`, `progress()`, `remaining()` |
+| Característica / Criterio | `delay()` Clásico | `millis()` Tradicional | 💻 `AyresTimerSW` (Software) | ⚙️ `AyresTimerHW` (Bare-Metal HW) |
+| :--- | :--- | :--- | :--- | :--- |
+| **¿Bloquea la CPU / Código?** | ❌ **100% Bloqueante.** Congela por completo la ejecución del ESP32. | ⚠️ No bloquea, pero satura el `loop()` con variables y comprobaciones `if`. | ✅ **0% Bloqueo.** Totalmente asíncrono en segundo plano (Kernel FreeRTOS). | ✅ **0% Bloqueo.** Totalmente autónomo en el silicio (Circuitos de Hardware). |
+| **Comportamiento ante Carga (WiFi / HTTP / Pantallas)** | ❌ Se congela todo el microcontrolador. | ❌ **Se desincroniza.** Si el `loop()` tarda 50 ms en atender WiFi, el timer se retrasa 50 ms. | ✅ **Inmune.** Se despacha en tarea dedicada; salta al microsegundo exacto. | ✅ **Inmune.** Interrupción directa por hardware en silicio (Cero latencia). |
+| **Resolución Temporal** | Milisegundos imprecisos. | 1 Milisegundo (1.000 µs). | ✅ **1 Microsegundo (`uint64_t`)** (1.000 veces más fino). | ✅ **12.5 Nanosegundos** (Pulsos de reloj APB a 80 MHz). |
+| **Límite de Desbordamiento (*Rollover*)** | N/A | ❌ **Se rompe a los 49.7 días** (Desborde de variable de 32 bits). | ✅ **Inmune:** Más de **500.000 años** de ejecución continua sin fallar (64 bits). | ✅ **Inmune:** Contador de silicio de 64 bits (> 500.000 años). |
+| **Cambios Dinámicos de Frecuencia de CPU (80/160/240 MHz)** | ❌ Se descalibra y varía tiempos. | ❌ Se descalibra con cambios de reloj. | ✅ **Inmune:** Sincronizado con el temporizador de alta resolución del sistema. | ✅ **Inmune:** Autocalibración directa con el bus APB y cristal oscilador. |
+| **Control en Caliente (`pause`, `resume`, `retrigger`)** | ❌ Imposible. | ❌ Requiere lógica manual compleja y propensa a errores. | ✅ **Nativo:** Métodos directos de pausa, reanudación y rearme inmediato. | ✅ **Nativo en Silicio:** Congelamiento de ticks y reinicio instantáneo de registros. |
+| **Monitoreo de Jitter y Telemetría en Vivo** | ❌ Ninguno. | ❌ Ninguno. | ✅ **Sí:** Mide desviación en microsegundos (`lastJitterUs`, `maxJitterUs`). | ✅ **Sí:** Mide fluctuación exacta de hardware en tiempo real. |
+| **Consultas de Progreso (`progress%`, `remainingMs`)** | ❌ Imposible. | ❌ Cálculo manual. | ✅ **Nativo:** `remainingMs()` y `progress()` (0.0% a 100.0%). | ✅ **Nativo:** Lectura instantánea de contador por *latch* en silicio. |
+| **Seguridad Multihilo / Multicore (ESP32 Dual Core)** | ❌ No aplicable. | ❌ Inseguro (Condiciones de carrera en variables compartidas). | ✅ **Thread-Safe:** Mutex recursivos + Spinlocks (`portMUX_TYPE`). | ✅ **Thread-Safe:** Spinlocks de hardware + Asignación segura de núcleos. |
+| **Capacidad / Cantidad Simultánea** | 1 (y congela todo). | Requiere decenas de variables globales. | ✅ **Ilimitados:** Decenas o cientos de temporizadores virtuales independientes. | ✅ **4 Temporizadores Físicos** independientes (TG0-T0/T1, TG1-T0/T1). |
+| **Casos de Uso Recomendados** | Pruebas rápidas de laboratorio. | Temporizaciones simples no críticas. | **Sistemas de Alarma, Heartbeats, Sirenas, Pantallas, IoT y FSMs.** | **Electrónica de Potencia (220V Triac), Audio, RF 433 MHz, DSP.** |
 
 ---
 

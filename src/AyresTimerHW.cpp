@@ -1,8 +1,33 @@
-/* AyresTimer v4.1.0 - Hardware backend (ESP32 Timer Group). */
+/*
+ * =============================================================================
+ * AyresTimer v4.1.0 - Backend de Hardware (Bare-Metal Silicon Register Direct Access)
+ * Desarrollado por AyresNet (https://ayresnet.com)
+ * =============================================================================
+ *
+ * ARQUITECTURA DE HARDWARE (TIMER GROUPS TG0 / TG1):
+ * --------------------------------------------------
+ * El microcontrolador ESP32 cuenta con 2 grupos de temporizadores de hardware
+ * en el silicio (TG0 y TG1), cada uno compuesto por 2 temporizadores universales
+ * de 64 bits (T0 y T1).
+ *
+ * Este archivo implementa el control directo sin capas intermedias genéricas:
+ * 1. Acceso directo a registros MMIO mapeados en memoria mediante timg_dev_t.
+ * 2. Prescaler de 16 bits derivado del bus de reloj de periféricos APB (80 MHz).
+ * 3. Comparador de alarma de 64 bits con auto-recarga electrónica en silicio.
+ * 4. Barreras de memoria en ensamblador inline Xtensa ('memw') para sincronización.
+ * 5. Asignación de vector de interrupción de hardware directo en IRAM (esp_intr_alloc).
+ * 6. Despacho seguro de callbacks C++ en tareas FreeRTOS dedicadas.
+ *
+ * Licencia: MIT
+ * =============================================================================
+ */
 
 #include "AyresTimer.h"
 
-#include <driver/timer.h>
+#include <soc/timer_group_struct.h>
+#include <soc/timer_group_reg.h>
+#include <soc/soc.h>
+#include <esp_intr_alloc.h>
 #include <esp32/clk.h>
 #include <esp_err.h>
 #include <esp_attr.h>
@@ -10,8 +35,22 @@
 #include <string.h>
 
 namespace {
+// Intervalo de espera para apagar limpiamente la tarea FreeRTOS
 constexpr TickType_t kTaskShutdownPollTicks = pdMS_TO_TICKS(1);
 
+// Punteros a los mapas de registros físicos de los Timer Groups en memoria de silicio
+timg_dev_t* const kTimerGroups[2] = { &TIMERG0, &TIMERG1 };
+
+// Vector de fuentes de interrupción de hardware asignadas por grupo y timer
+const int kTimerIntrSources[2][2] = {
+    { ETS_TG0_T0_LEVEL_INTR_SOURCE, ETS_TG0_T1_LEVEL_INTR_SOURCE },
+    { ETS_TG1_T0_LEVEL_INTR_SOURCE, ETS_TG1_T1_LEVEL_INTR_SOURCE }
+};
+
+/**
+ * @brief Guardia RAII para semáforos/mutex recursivos.
+ * Asegura la liberación automática del mutex al salir del ámbito (scope).
+ */
 class RecursiveGuard {
 public:
     explicit RecursiveGuard(SemaphoreHandle_t mutex) : _mutex(mutex) {
@@ -26,17 +65,23 @@ private:
     bool _locked = false;
 };
 
+/**
+ * @brief Valida que el identificador de núcleo de CPU sea válido en el ESP32.
+ */
 bool validCore(BaseType_t core) {
     return core == AYRES_TIMER_AUTO_CORE || core == tskNO_AFFINITY ||
            (core >= 0 && core < portNUM_PROCESSORS);
 }
 
+// Mutex de spinlock para proteger la tabla de propietarios de hardware entre cores
 portMUX_TYPE hardwareOwnersMux = portMUX_INITIALIZER_UNLOCKED;
 AyresTimerHW* hardwareOwners[2][2] = {{nullptr, nullptr}, {nullptr, nullptr}};
 
-// floor(value * multiplier / divisor), sin depender de __int128.
-bool mulDivFloor(uint64_t value, uint64_t multiplier, uint64_t divisor,
-                 uint64_t& result) {
+/**
+ * @brief Multiplicación y división entera de 64 bits sin desbordamiento.
+ * Calcula: floor(value * multiplier / divisor) evitando el overflow de uint64_t.
+ */
+bool mulDivFloor(uint64_t value, uint64_t multiplier, uint64_t divisor, uint64_t& result) {
     if (divisor == 0) return false;
     const uint64_t quotient = value / divisor;
     const uint64_t remainder = value % divisor;
@@ -47,21 +92,41 @@ bool mulDivFloor(uint64_t value, uint64_t multiplier, uint64_t divisor,
     result = whole + fraction;
     return true;
 }
+
+/**
+ * @brief Barrera de memoria física Xtensa.
+ * Fuerza a la CPU a vaciar el pipeline de escritura al bus de periféricos
+ * antes de continuar ejecutando la siguiente instrucción.
+ */
+static inline void IRAM_ATTR memoryBarrier() {
+    __asm__ __volatile__("memw" : : : "memory");
 }
+}
+
+// Tabla global de handles de interrupción asignados
+static intr_handle_t s_intrHandles[2][2] = {{nullptr, nullptr}, {nullptr, nullptr}};
+
+// =============================================================================
+// CONSTRUCTOR Y DESTRUCTOR
+// =============================================================================
 
 AyresTimer<AYRES_HARDWARE>::AyresTimer(Group group, Index idx)
     : _group(static_cast<timer_group_t>(group)),
       _idx(static_cast<timer_idx_t>(idx)) {
+    // Crear mutexes recursivos para proteger operaciones multihilo
     _apiMutex = xSemaphoreCreateRecursiveMutex();
     _callbackMutex = xSemaphoreCreateRecursiveMutex();
     if (!_apiMutex || !_callbackMutex) setError_(ESP_ERR_NO_MEM);
 }
 
 AyresTimer<AYRES_HARDWARE>::~AyresTimer() {
+    // Detener el hardware y liberar recursos
     (void)stop();
     const bool releasedCleanly = teardownHardware_();
     if (releasedCleanly) releaseHardware_();
     stopTask_();
+
+    // Eliminar mutexes de sincronización
     if (_callbackMutex) {
         vSemaphoreDelete(_callbackMutex);
         _callbackMutex = nullptr;
@@ -71,6 +136,10 @@ AyresTimer<AYRES_HARDWARE>::~AyresTimer() {
         _apiMutex = nullptr;
     }
 }
+
+// =============================================================================
+// GESTION DE ERRORES Y ESTADO
+// =============================================================================
 
 bool AyresTimer<AYRES_HARDWARE>::validMode_(TimerMode mode) const {
     return mode == ONE_SHOT || mode == PERIODIC || mode == RETRIGGERABLE;
@@ -105,6 +174,10 @@ void AyresTimer<AYRES_HARDWARE>::resetStats() {
     _stats = TimerStats{};
     portEXIT_CRITICAL(&_mux);
 }
+
+// =============================================================================
+// CONFIGURACION Y PROPIEDAD EXCLUSIVA DEL HARDWARE
+// =============================================================================
 
 bool AyresTimer<AYRES_HARDWARE>::setClockDivisor(uint32_t divisor) {
     if (xPortInIsrContext()) {
@@ -166,23 +239,30 @@ void AyresTimer<AYRES_HARDWARE>::releaseHardware_() {
 }
 
 bool AyresTimer<AYRES_HARDWARE>::teardownHardware_() {
-    esp_err_t firstError = ESP_OK;
+    const int group = static_cast<int>(_group);
+    const int index = static_cast<int>(_idx);
+    timg_dev_t* hw = kTimerGroups[group];
 
-    if (_isrRegistered) {
-        const esp_err_t err = timer_isr_callback_remove(_group, _idx);
-        if (err != ESP_OK && firstError == ESP_OK) firstError = err;
-        if (err == ESP_OK) _isrRegistered = false;
+    // Detener conteo y deshabilitar interrupciones directamente en registros del silicio
+    hw->hw_timer[index].config.enable = 0;
+    hw->hw_timer[index].config.level_int_en = 0;
+    hw->hw_timer[index].config.alarm_en = 0;
+    memoryBarrier();
+
+    if (_isrRegistered && s_intrHandles[group][index]) {
+        esp_intr_free(s_intrHandles[group][index]);
+        s_intrHandles[group][index] = nullptr;
+        _isrRegistered = false;
     }
 
-    if (_initialized) {
-        const esp_err_t err = timer_deinit(_group, _idx);
-        if (err != ESP_OK && firstError == ESP_OK) firstError = err;
-        if (err == ESP_OK) _initialized = false;
-    }
-
-    setError_(firstError);
-    return firstError == ESP_OK;
+    _initialized = false;
+    setError_(ESP_OK);
+    return true;
 }
+
+// =============================================================================
+// CONTROL PRINCIPAL: START, STOP, PAUSE, RESUME, RETRIGGER
+// =============================================================================
 
 bool AyresTimer<AYRES_HARDWARE>::start(uint64_t microseconds, TimerMode mode) {
     if (xPortInIsrContext()) {
@@ -214,12 +294,14 @@ bool AyresTimer<AYRES_HARDWARE>::start(uint64_t microseconds, TimerMode mode) {
     const uint32_t divisor = _divisor;
     portEXIT_CRITICAL(&_mux);
 
+    // Leer la frecuencia real del bus de reloj de periféricos APB (80 MHz)
     const uint32_t apbHz = static_cast<uint32_t>(esp_clk_apb_freq());
     if (apbHz == 0) {
         setError_(ESP_ERR_INVALID_STATE);
         return false;
     }
 
+    // Calcular ticks de hardware correspondientes al tiempo solicitado
     const uint64_t tickDenominator = static_cast<uint64_t>(divisor) * 1000000ULL;
     uint64_t ticks = 0;
     if (!mulDivFloor(microseconds, apbHz, tickDenominator, ticks)) {
@@ -228,39 +310,56 @@ bool AyresTimer<AYRES_HARDWARE>::start(uint64_t microseconds, TimerMode mode) {
     }
     if (ticks == 0) ticks = 1;
 
-    timer_config_t config;
-    memset(&config, 0, sizeof(config));
-    config.divider = divisor;
-    config.counter_dir = TIMER_COUNT_UP;
-    config.counter_en = TIMER_PAUSE;
-    config.alarm_en = TIMER_ALARM_EN;
-    config.intr_type = TIMER_INTR_LEVEL;
-    config.auto_reload = mode == PERIODIC ? TIMER_AUTORELOAD_EN : TIMER_AUTORELOAD_DIS;
+    const int g = static_cast<int>(_group);
+    const int idx = static_cast<int>(_idx);
+    timg_dev_t* hw = kTimerGroups[g];
 
-    esp_err_t err = timer_init(_group, _idx, &config);
-    if (err != ESP_OK) {
-        setError_(err);
-        return false;
+    // -------------------------------------------------------------------------
+    // ESCRITURA DIRECTA EN REGISTROS DEL SILICIO (BARE-METAL MMIO)
+    // -------------------------------------------------------------------------
+    
+    // 1. Apagar temporalmente el contador mientras se aplica la configuración
+    hw->hw_timer[idx].config.enable = 0;
+    memoryBarrier();
+
+    // 2. Cargar prescaler (divisor de reloj de 16 bits: 2 a 65536)
+    hw->hw_timer[idx].config.divider = (divisor == 65536) ? 0 : static_cast<uint16_t>(divisor);
+
+    // 3. Conteo ascendente (increase = 1)
+    hw->hw_timer[idx].config.increase = 1;
+
+    // 4. Auto-recarga en silicio para modo periódico
+    hw->hw_timer[idx].config.autoreload = (mode == PERIODIC) ? 1 : 0;
+
+    // 5. Cargar valor inicial 0 en registros de recarga del contador físico
+    hw->hw_timer[idx].load_high = 0;
+    hw->hw_timer[idx].load_low = 0;
+    memoryBarrier();
+    hw->hw_timer[idx].reload = 1; // Dispara la carga inmediata en silicio
+    memoryBarrier();
+
+    // 6. Configurar valor de alarma de hardware (64 bits dividido en High y Low)
+    hw->hw_timer[idx].alarm_high = static_cast<uint32_t>(ticks >> 32);
+    hw->hw_timer[idx].alarm_low = static_cast<uint32_t>(ticks & 0xFFFFFFFFULL);
+    hw->hw_timer[idx].config.alarm_en = 1;
+    hw->hw_timer[idx].config.level_int_en = 1;
+    memoryBarrier();
+
+    // 7. Asignar vector de interrupción de hardware directo en IRAM si no existe
+    if (!s_intrHandles[g][idx]) {
+        const int source = kTimerIntrSources[g][idx];
+        const esp_err_t err = esp_intr_alloc(
+            source, ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL1,
+            reinterpret_cast<intr_handler_t>(&AyresTimer<AYRES_HARDWARE>::onTimerInterrupt),
+            this, &s_intrHandles[g][idx]);
+        if (err != ESP_OK) {
+            setError_(err);
+            return false;
+        }
+        _isrRegistered = true;
     }
+
     _initialized = true;
-
-    err = timer_set_counter_value(_group, _idx, 0);
-    if (err == ESP_OK) err = timer_set_alarm_value(_group, _idx, ticks);
-    if (err == ESP_OK) {
-        err = timer_isr_callback_add(
-            _group, _idx, &AyresTimer<AYRES_HARDWARE>::onTimerInterrupt,
-            this, ESP_INTR_FLAG_IRAM);
-        if (err == ESP_OK) _isrRegistered = true;
-    }
-    if (err == ESP_OK) err = timer_enable_intr(_group, _idx);
-
-    if (err != ESP_OK) {
-        setError_(err);
-        (void)teardownHardware_();
-        setError_(err);
-        return false;
-    }
-
     const uint64_t nowUs = static_cast<uint64_t>(esp_timer_get_time());
 
     portENTER_CRITICAL(&_mux);
@@ -274,16 +373,10 @@ bool AyresTimer<AYRES_HARDWARE>::start(uint64_t microseconds, TimerMode mode) {
     _lastError = ESP_OK;
     portEXIT_CRITICAL(&_mux);
 
-    err = timer_start(_group, _idx);
-    if (err != ESP_OK) {
-        portENTER_CRITICAL(&_mux);
-        _running = false;
-        _lastError = err;
-        portEXIT_CRITICAL(&_mux);
-        (void)teardownHardware_();
-        setError_(err);
-        return false;
-    }
+    // 8. Arrancar físicamente el temporizador en silicio
+    hw->hw_timer[idx].config.enable = 1;
+    memoryBarrier();
+
     return true;
 }
 
@@ -297,12 +390,17 @@ bool AyresTimer<AYRES_HARDWARE>::stop() {
         setError_(ESP_ERR_NO_MEM);
         return false;
     }
-    esp_err_t firstError = ESP_OK;
+
+    const int g = static_cast<int>(_group);
+    const int idx = static_cast<int>(_idx);
+    timg_dev_t* hw = kTimerGroups[g];
+
     if (_initialized) {
-        const esp_err_t intrErr = timer_disable_intr(_group, _idx);
-        if (intrErr != ESP_OK) firstError = intrErr;
-        const esp_err_t pauseErr = timer_pause(_group, _idx);
-        if (pauseErr != ESP_OK && firstError == ESP_OK) firstError = pauseErr;
+        // Deshabilitar contador e interrupciones en silicio
+        hw->hw_timer[idx].config.enable = 0;
+        hw->hw_timer[idx].config.level_int_en = 0;
+        hw->hw_timer[idx].config.alarm_en = 0;
+        memoryBarrier();
     }
 
     portENTER_CRITICAL(&_mux);
@@ -310,9 +408,9 @@ bool AyresTimer<AYRES_HARDWARE>::stop() {
     _paused = false;
     _pausedTicks = 0;
     _cancelThrough = _producedCallbacks;
-    _lastError = firstError;
+    _lastError = ESP_OK;
     portEXIT_CRITICAL(&_mux);
-    return firstError == ESP_OK;
+    return true;
 }
 
 bool AyresTimer<AYRES_HARDWARE>::pause() {
@@ -333,21 +431,27 @@ bool AyresTimer<AYRES_HARDWARE>::pause() {
         return false;
     }
 
-    uint64_t ticks = 0;
-    esp_err_t err = timer_get_counter_value(_group, _idx, &ticks);
-    if (err == ESP_OK) err = timer_pause(_group, _idx);
-    if (err == ESP_OK) err = timer_disable_intr(_group, _idx);
+    const int g = static_cast<int>(_group);
+    const int idx = static_cast<int>(_idx);
+    timg_dev_t* hw = kTimerGroups[g];
 
-    if (err == ESP_OK) {
-        portENTER_CRITICAL(&_mux);
-        _paused = true;
-        _pausedTicks = ticks;
-        _lastError = ESP_OK;
-        portEXIT_CRITICAL(&_mux);
-        return true;
-    }
-    setError_(err);
-    return false;
+    // Detener el conteo en silicio y capturar los ticks transcurridos
+    hw->hw_timer[idx].config.enable = 0;
+    hw->hw_timer[idx].config.level_int_en = 0;
+    memoryBarrier();
+
+    // Latch del contador de hardware
+    hw->hw_timer[idx].update = 1;
+    memoryBarrier();
+    const uint64_t ticks = (static_cast<uint64_t>(hw->hw_timer[idx].cnt_high) << 32) |
+                           static_cast<uint64_t>(hw->hw_timer[idx].cnt_low);
+
+    portENTER_CRITICAL(&_mux);
+    _paused = true;
+    _pausedTicks = ticks;
+    _lastError = ESP_OK;
+    portEXIT_CRITICAL(&_mux);
+    return true;
 }
 
 bool AyresTimer<AYRES_HARDWARE>::resume() {
@@ -368,18 +472,21 @@ bool AyresTimer<AYRES_HARDWARE>::resume() {
         return false;
     }
 
-    esp_err_t err = timer_enable_intr(_group, _idx);
-    if (err == ESP_OK) err = timer_start(_group, _idx);
+    const int g = static_cast<int>(_group);
+    const int idx = static_cast<int>(_idx);
+    timg_dev_t* hw = kTimerGroups[g];
 
-    if (err == ESP_OK) {
-        portENTER_CRITICAL(&_mux);
-        _paused = false;
-        _lastError = ESP_OK;
-        portEXIT_CRITICAL(&_mux);
-        return true;
-    }
-    setError_(err);
-    return false;
+    // Reanudar conteo e interrupciones en silicio
+    hw->hw_timer[idx].config.alarm_en = 1;
+    hw->hw_timer[idx].config.level_int_en = 1;
+    hw->hw_timer[idx].config.enable = 1;
+    memoryBarrier();
+
+    portENTER_CRITICAL(&_mux);
+    _paused = false;
+    _lastError = ESP_OK;
+    portEXIT_CRITICAL(&_mux);
+    return true;
 }
 
 bool AyresTimer<AYRES_HARDWARE>::restart() {
@@ -447,10 +554,23 @@ bool AyresTimer<AYRES_HARDWARE>::retrigger() {
         return false;
     }
 
-    const esp_err_t err = timer_set_counter_value(_group, _idx, 0);
-    setError_(err);
-    return err == ESP_OK;
+    const int g = static_cast<int>(_group);
+    const int idx = static_cast<int>(_idx);
+    timg_dev_t* hw = kTimerGroups[g];
+
+    // Reinicio directo de registros de precarga a cero en silicio
+    hw->hw_timer[idx].load_high = 0;
+    hw->hw_timer[idx].load_low = 0;
+    memoryBarrier();
+    hw->hw_timer[idx].reload = 1;
+    memoryBarrier();
+
+    return true;
 }
+
+// =============================================================================
+// CONSULTAS EN TIEMPO REAL: ELAPSED, REMAINING, PROGRESS
+// =============================================================================
 
 uint64_t AyresTimer<AYRES_HARDWARE>::elapsed() const {
     if (xPortInIsrContext()) {
@@ -474,11 +594,15 @@ uint64_t AyresTimer<AYRES_HARDWARE>::elapsed() const {
 
     uint64_t ticks = pausedTicks;
     if (!paused) {
-        const esp_err_t err = timer_get_counter_value(_group, _idx, &ticks);
-        if (err != ESP_OK) {
-            setError_(err);
-            return 0;
-        }
+        const int g = static_cast<int>(_group);
+        const int idx = static_cast<int>(_idx);
+        timg_dev_t* hw = kTimerGroups[g];
+
+        // Latch instantáneo del hardware para congelar y leer los 64 bits de forma atómica
+        hw->hw_timer[idx].update = 1;
+        memoryBarrier();
+        ticks = (static_cast<uint64_t>(hw->hw_timer[idx].cnt_high) << 32) |
+                static_cast<uint64_t>(hw->hw_timer[idx].cnt_low);
     }
 
     uint64_t microseconds = 0;
@@ -521,6 +645,10 @@ bool AyresTimer<AYRES_HARDWARE>::isPaused() const {
     portEXIT_CRITICAL(&_mux);
     return paused;
 }
+
+// =============================================================================
+// REGISTRO DE CALLBACKS Y TAREAS FREERTOS
+// =============================================================================
 
 bool AyresTimer<AYRES_HARDWARE>::setCallback(Callback callback) {
     if (!_callbackMutex || xPortInIsrContext()) {
@@ -712,17 +840,36 @@ bool AyresTimer<AYRES_HARDWARE>::useTask(bool enable, UBaseType_t priority,
     return true;
 }
 
+// =============================================================================
+// MANEJADOR DE INTERRUPCION DE SILICIO (ISR) Y DESPACHO DE TAREA
+// =============================================================================
+
 bool IRAM_ATTR AyresTimer<AYRES_HARDWARE>::onTimerInterrupt(void* arg) {
     auto* self = static_cast<AyresTimer<AYRES_HARDWARE>*>(arg);
+    const int g = static_cast<int>(self->_group);
+    const int idx = static_cast<int>(self->_idx);
+    timg_dev_t* hw = kTimerGroups[g];
+
+    // Limpieza física inmediata de la bandera de interrupción en el registro de silicio
+    if (idx == 0) {
+        hw->int_clr_timers.t0 = 1;
+    } else {
+        hw->int_clr_timers.t1 = 1;
+    }
+    memoryBarrier();
+
     const uint64_t nowUs = static_cast<uint64_t>(esp_timer_get_time());
 
     portENTER_CRITICAL_ISR(&self->_mux);
     if (self->_mode != PERIODIC) {
         self->_running = false;
-        timer_group_set_counter_enable_in_isr(self->_group, self->_idx, TIMER_PAUSE);
+        hw->hw_timer[idx].config.enable = 0; // Detener conteo si es disparo único
+    } else {
+        hw->hw_timer[idx].config.alarm_en = 1; // Re-armar alarma periódica en hardware
     }
+    memoryBarrier();
 
-    // Telemetría de disparo
+    // Telemetría en tiempo real
     ++self->_stats.totalTriggers;
     self->_stats.lastTriggerUs = nowUs;
     if (self->_expectedNextUs > 0) {
@@ -745,11 +892,13 @@ bool IRAM_ATTR AyresTimer<AYRES_HARDWARE>::onTimerInterrupt(void* arg) {
     if (task) ++self->_producedCallbacks;
     portEXIT_CRITICAL_ISR(&self->_mux);
 
+    // Despertar la tarea FreeRTOS de despacho seguro si está configurada
     if (task) {
         BaseType_t woken = pdFALSE;
         vTaskNotifyGiveFromISR(task, &woken);
         return woken == pdTRUE;
     }
+    // Si no hay tarea, invocar callback directo de ISR
     if (callback) callback(callbackArg);
     return false;
 }
@@ -757,6 +906,7 @@ bool IRAM_ATTR AyresTimer<AYRES_HARDWARE>::onTimerInterrupt(void* arg) {
 void AyresTimer<AYRES_HARDWARE>::callbackTask_(void* pv) {
     auto* self = static_cast<AyresTimer<AYRES_HARDWARE>*>(pv);
     for (;;) {
+        // Espera bloqueante sin consumo de CPU hasta que la ISR de hardware le avise
         (void)ulTaskNotifyTake(pdFALSE, portMAX_DELAY);
 
         portENTER_CRITICAL(&self->_mux);
@@ -768,6 +918,7 @@ void AyresTimer<AYRES_HARDWARE>::callbackTask_(void* pv) {
         if (stopRequested) break;
         if (cancelled) continue;
 
+        // Ejecución segura del callback C++ dentro del contexto de tarea FreeRTOS
         if (self->_callbackMutex) {
             xSemaphoreTakeRecursive(self->_callbackMutex, portMAX_DELAY);
             portENTER_CRITICAL(&self->_mux);

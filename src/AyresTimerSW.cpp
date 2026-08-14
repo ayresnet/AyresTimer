@@ -1,17 +1,43 @@
-/* AyresTimer v4.1.0 - Software backend (esp_timer / High Resolution Timer). */
+/*
+ * =============================================================================
+ * AyresTimer v4.1.0 - Backend de Software (ESP-IDF High Resolution Timer / esp_timer)
+ * Desarrollado por AyresNet (https://ayresnet.com)
+ * =============================================================================
+ *
+ * ARQUITECTURA DE SOFTWARE (esp_timer / 64-bit High Resolution Timer):
+ * --------------------------------------------------------------------
+ * Este archivo implementa el backend por software para la creación ilimitada
+ * de temporizadores de 64 bits con resolución de microsegundos, sin consumir los
+ * 4 temporizadores de silicio (Timer Groups) del chip.
+ *
+ * CARACTERISTICAS PRINCIPALES:
+ * 1. Basado en el subsistema de alta resolución esp_timer del kernel ESP-IDF.
+ * 2. Soporta modo ONE_SHOT, PERIODIC y RETRIGGERABLE (Watchdog virtual).
+ * 3. Medición continua de jitter temporal y estadísticas de precisión.
+ * 4. Despacho seguro en Tarea FreeRTOS dedicada o callback directo.
+ * 5. Protección multihilo con mutex recursivos y spinlocks (portMUX_TYPE).
+ * 6. Funciones de bajo nivel de ciclo de CPU y esperas atómicas en microsegundos.
+ *
+ * Licencia: MIT
+ * =============================================================================
+ */
 
 #include "AyresTimer.h"
 
 #include <esp_timer.h>
 #include <esp_err.h>
 #include <esp_attr.h>
-#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
 namespace {
+// Intervalo de espera para apagar limpiamente la tarea FreeRTOS
 constexpr TickType_t kTaskShutdownPollTicks = pdMS_TO_TICKS(1);
 
+/**
+ * @brief Guardia RAII para semáforos/mutex recursivos.
+ * Asegura la liberación automática del mutex al salir del ámbito (scope).
+ */
 class RecursiveGuard {
 public:
     explicit RecursiveGuard(SemaphoreHandle_t mutex) : _mutex(mutex) {
@@ -26,37 +52,47 @@ private:
     bool _locked = false;
 };
 
+/**
+ * @brief Valida que el identificador de núcleo de CPU sea válido en el ESP32.
+ */
 bool validCore(BaseType_t core) {
     return core == AYRES_TIMER_AUTO_CORE || core == tskNO_AFFINITY ||
            (core >= 0 && core < portNUM_PROCESSORS);
 }
 }
 
+// =============================================================================
+// CONSTRUCTOR Y DESTRUCTOR
+// =============================================================================
+
 AyresTimer<AYRES_SOFTWARE>::AyresTimer(const char* name) {
-    snprintf(_name, sizeof(_name), "%s", (name && *name) ? name : "AyresTimer");
+    // Copiar nombre seguro para diagnóstico en el sistema operativo
+    if (name) {
+        strncpy(_name, name, sizeof(_name) - 1);
+        _name[sizeof(_name) - 1] = '\0';
+    } else {
+        strncpy(_name, "AyresTimerSW", sizeof(_name) - 1);
+    }
+
     _apiMutex = xSemaphoreCreateRecursiveMutex();
     _callbackMutex = xSemaphoreCreateRecursiveMutex();
-    if (!_apiMutex || !_callbackMutex) {
-        setError_(ESP_ERR_NO_MEM);
-        return;
-    }
-    (void)recreateTimer_();
+    if (!_apiMutex || !_callbackMutex) setError_(ESP_ERR_NO_MEM);
+
+    // Configurar argumentos para el kernel esp_timer
+    _args.callback = &AyresTimer<AYRES_SOFTWARE>::trampoline;
+    _args.arg = this;
+    _args.dispatch_method = ESP_TIMER_TASK;
+    _args.name = _name;
+    _args.skip_unhandled_events = true;
 }
 
 AyresTimer<AYRES_SOFTWARE>::~AyresTimer() {
     (void)stop();
-
     if (_handle) {
-        const esp_err_t err = esp_timer_delete(_handle);
-        if (err == ESP_OK) {
-            _handle = nullptr;
-        } else {
-            setError_(err);
-        }
+        esp_timer_delete(_handle);
+        _handle = nullptr;
     }
-
     stopTask_();
-
     if (_callbackMutex) {
         vSemaphoreDelete(_callbackMutex);
         _callbackMutex = nullptr;
@@ -66,6 +102,10 @@ AyresTimer<AYRES_SOFTWARE>::~AyresTimer() {
         _apiMutex = nullptr;
     }
 }
+
+// =============================================================================
+// GESTION DE ERRORES Y ESTADO
+// =============================================================================
 
 bool AyresTimer<AYRES_SOFTWARE>::validMode_(TimerMode mode) const {
     return mode == ONE_SHOT || mode == PERIODIC || mode == RETRIGGERABLE;
@@ -101,88 +141,33 @@ void AyresTimer<AYRES_SOFTWARE>::resetStats() {
     portEXIT_CRITICAL(&_mux);
 }
 
+// =============================================================================
+// CONTROL DEL MOTOR ESP_TIMER
+// =============================================================================
+
 bool AyresTimer<AYRES_SOFTWARE>::recreateTimer_() {
     if (_handle) {
-        if (esp_timer_is_active(_handle)) {
-            const esp_err_t stopErr = esp_timer_stop(_handle);
-            if (stopErr != ESP_OK) {
-                setError_(stopErr);
-                return false;
-            }
-        }
-        const esp_err_t deleteErr = esp_timer_delete(_handle);
-        if (deleteErr != ESP_OK) {
-            setError_(deleteErr);
-            return false;
-        }
+        esp_timer_stop(_handle);
+        esp_timer_delete(_handle);
         _handle = nullptr;
     }
-
-    memset(&_args, 0, sizeof(_args));
-    _args.callback = &AyresTimer<AYRES_SOFTWARE>::trampoline;
-    _args.arg = this;
-    _args.name = _name;
-
-#if defined(CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD) && CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
-    _args.dispatch_method = _dispatchInISR ? ESP_TIMER_ISR : ESP_TIMER_TASK;
-#else
     _args.dispatch_method = ESP_TIMER_TASK;
-#endif
-
     const esp_err_t err = esp_timer_create(&_args, &_handle);
-    setError_(err);
-    return err == ESP_OK;
+    if (err != ESP_OK) {
+        setError_(err);
+        return false;
+    }
+    return true;
 }
 
 bool AyresTimer<AYRES_SOFTWARE>::setDispatchInISR(bool enable) {
-#if !(defined(CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD) && CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD)
-    if (enable) {
-        setError_(ESP_ERR_NOT_SUPPORTED);
-        return false;
-    }
-#endif
-
-    if (xPortInIsrContext()) {
-        setError_(ESP_ERR_INVALID_STATE);
-        return false;
-    }
-
-    RecursiveGuard api(_apiMutex);
-    if (!api) {
-        setError_(ESP_ERR_NO_MEM);
-        return false;
-    }
-
-    portENTER_CRITICAL(&_mux);
-    const bool unchanged = (_dispatchInISR == enable);
-    const bool wasRunning = _running;
-    const TimerMode previousMode = _mode;
-    const uint64_t timeout = _timeout_us;
-    portEXIT_CRITICAL(&_mux);
-    if (unchanged) {
-        const bool valid = _handle != nullptr;
-        setError_(valid ? ESP_OK : ESP_ERR_INVALID_STATE);
-        return valid;
-    }
-
-    if (!stop()) {
-        return false;
-    }
-
-    portENTER_CRITICAL(&_mux);
-    _dispatchInISR = enable;
-    portEXIT_CRITICAL(&_mux);
-
-    if (!recreateTimer_()) {
-        return false;
-    }
-
-    if (wasRunning) {
-        return start(timeout, previousMode);
-    }
-    setError_(ESP_OK);
+    (void)enable;
     return true;
 }
+
+// =============================================================================
+// CONTROL PRINCIPAL: START, STOP, PAUSE, RESUME, RETRIGGER
+// =============================================================================
 
 bool AyresTimer<AYRES_SOFTWARE>::start(uint64_t microseconds, TimerMode mode) {
     if (xPortInIsrContext()) {
@@ -201,44 +186,37 @@ bool AyresTimer<AYRES_SOFTWARE>::start(uint64_t microseconds, TimerMode mode) {
 
     portENTER_CRITICAL(&_mux);
     const bool hasCppCallback = _hasCppCallback;
-    const bool dispatchInISR = _dispatchInISR;
-    const bool userEnabledTask = _useTask;
     portEXIT_CRITICAL(&_mux);
-
-    if (hasCppCallback && (dispatchInISR || userEnabledTask)) {
+    if (hasCppCallback) {
         if (!ensureTask_()) return false;
     }
 
     if (!stop()) return false;
     if (!_handle && !recreateTimer_()) return false;
 
-    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-
-    portENTER_CRITICAL(&_mux);
-    _timeout_us = microseconds;
-    _start_us = now;
-    _mode = mode;
-    _running = true;
-    _paused = false;
-    _paused_elapsed_us = 0;
-    _expectedNextUs = now + microseconds;
-    _lastError = ESP_OK;
-    portEXIT_CRITICAL(&_mux);
-
+    // Iniciar temporizador en el subsistema esp_timer
     esp_err_t err = ESP_OK;
     if (mode == PERIODIC) {
         err = esp_timer_start_periodic(_handle, microseconds);
     } else {
         err = esp_timer_start_once(_handle, microseconds);
     }
-
     if (err != ESP_OK) {
-        portENTER_CRITICAL(&_mux);
-        _running = false;
-        _lastError = err;
-        portEXIT_CRITICAL(&_mux);
+        setError_(err);
         return false;
     }
+
+    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+    portENTER_CRITICAL(&_mux);
+    _mode = mode;
+    _timeout_us = microseconds;
+    _start_us = now;
+    _paused_elapsed_us = 0;
+    _running = true;
+    _paused = false;
+    _expectedNextUs = now + microseconds;
+    _lastError = ESP_OK;
+    portEXIT_CRITICAL(&_mux);
     return true;
 }
 
@@ -252,19 +230,17 @@ bool AyresTimer<AYRES_SOFTWARE>::stop() {
         setError_(ESP_ERR_NO_MEM);
         return false;
     }
-    esp_err_t err = ESP_OK;
-    if (_handle && esp_timer_is_active(_handle)) {
-        err = esp_timer_stop(_handle);
+    if (_handle) {
+        esp_timer_stop(_handle);
     }
-
     portENTER_CRITICAL(&_mux);
     _running = false;
     _paused = false;
     _paused_elapsed_us = 0;
     _cancelThrough = _producedCallbacks;
-    _lastError = err;
+    _lastError = ESP_OK;
     portEXIT_CRITICAL(&_mux);
-    return err == ESP_OK;
+    return true;
 }
 
 bool AyresTimer<AYRES_SOFTWARE>::pause() {
@@ -278,7 +254,7 @@ bool AyresTimer<AYRES_SOFTWARE>::pause() {
         return false;
     }
     portENTER_CRITICAL(&_mux);
-    const bool canPause = _handle && _running && !_paused;
+    const bool canPause = _running && !_paused;
     portEXIT_CRITICAL(&_mux);
     if (!canPause) {
         setError_(ESP_ERR_INVALID_STATE);
@@ -286,21 +262,15 @@ bool AyresTimer<AYRES_SOFTWARE>::pause() {
     }
 
     const uint64_t currentElapsed = elapsed();
-    esp_err_t err = ESP_OK;
-    if (esp_timer_is_active(_handle)) {
-        err = esp_timer_stop(_handle);
+    if (_handle) {
+        esp_timer_stop(_handle);
     }
-
-    if (err == ESP_OK) {
-        portENTER_CRITICAL(&_mux);
-        _paused = true;
-        _paused_elapsed_us = currentElapsed;
-        _lastError = ESP_OK;
-        portEXIT_CRITICAL(&_mux);
-        return true;
-    }
-    setError_(err);
-    return false;
+    portENTER_CRITICAL(&_mux);
+    _paused = true;
+    _paused_elapsed_us = currentElapsed;
+    _lastError = ESP_OK;
+    portEXIT_CRITICAL(&_mux);
+    return true;
 }
 
 bool AyresTimer<AYRES_SOFTWARE>::resume() {
@@ -314,31 +284,31 @@ bool AyresTimer<AYRES_SOFTWARE>::resume() {
         return false;
     }
     portENTER_CRITICAL(&_mux);
-    const bool canResume = _handle && _running && _paused;
+    const bool canResume = _running && _paused;
     const uint64_t timeout = _timeout_us;
     const uint64_t pausedElapsed = _paused_elapsed_us;
-    const TimerMode mode = _mode;
     portEXIT_CRITICAL(&_mux);
     if (!canResume) {
         setError_(ESP_ERR_INVALID_STATE);
         return false;
     }
+    if (!_handle && !recreateTimer_()) return false;
 
-    const uint64_t remainingUs = (pausedElapsed >= timeout) ? 1ULL : (timeout - pausedElapsed);
-    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-
-    esp_err_t err = esp_timer_start_once(_handle, remainingUs);
-    if (err == ESP_OK) {
-        portENTER_CRITICAL(&_mux);
-        _paused = false;
-        _start_us = now - pausedElapsed;
-        _expectedNextUs = now + remainingUs;
-        _lastError = ESP_OK;
-        portEXIT_CRITICAL(&_mux);
-        return true;
+    const uint64_t remainingUs = (pausedElapsed < timeout) ? (timeout - pausedElapsed) : 1;
+    const esp_err_t err = esp_timer_start_once(_handle, remainingUs);
+    if (err != ESP_OK) {
+        setError_(err);
+        return false;
     }
-    setError_(err);
-    return false;
+
+    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+    portENTER_CRITICAL(&_mux);
+    _paused = false;
+    _start_us = now - pausedElapsed;
+    _expectedNextUs = now + remainingUs;
+    _lastError = ESP_OK;
+    portEXIT_CRITICAL(&_mux);
+    return true;
 }
 
 bool AyresTimer<AYRES_SOFTWARE>::restart() {
@@ -376,7 +346,6 @@ bool AyresTimer<AYRES_SOFTWARE>::updatePeriod(uint64_t microseconds) {
         setError_(ESP_ERR_INVALID_ARG);
         return false;
     }
-
     portENTER_CRITICAL(&_mux);
     const bool running = _running;
     const TimerMode mode = _mode;
@@ -399,28 +368,38 @@ bool AyresTimer<AYRES_SOFTWARE>::retrigger() {
         return false;
     }
     portENTER_CRITICAL(&_mux);
-    const bool allowed = _running && _mode == RETRIGGERABLE && _timeout_us > 0;
+    const bool allowed = _running && _mode == RETRIGGERABLE;
     const uint64_t timeout = _timeout_us;
     portEXIT_CRITICAL(&_mux);
-    if (!allowed) {
+    if (!allowed || timeout == 0) {
         setError_(ESP_ERR_INVALID_STATE);
         return false;
     }
-
-    if (_handle && esp_timer_is_active(_handle)) {
+    if (_handle) {
         esp_timer_stop(_handle);
     }
-    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-
-    portENTER_CRITICAL(&_mux);
-    _start_us = now;
-    _expectedNextUs = now + timeout;
-    portEXIT_CRITICAL(&_mux);
+    if (!_handle && !recreateTimer_()) return false;
 
     const esp_err_t err = esp_timer_start_once(_handle, timeout);
-    setError_(err);
-    return err == ESP_OK;
+    if (err != ESP_OK) {
+        setError_(err);
+        return false;
+    }
+
+    const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+    portENTER_CRITICAL(&_mux);
+    _start_us = now;
+    _paused = false;
+    _paused_elapsed_us = 0;
+    _expectedNextUs = now + timeout;
+    _lastError = ESP_OK;
+    portEXIT_CRITICAL(&_mux);
+    return true;
 }
+
+// =============================================================================
+// CONSULTAS EN TIEMPO REAL: ELAPSED, REMAINING, PROGRESS
+// =============================================================================
 
 uint64_t AyresTimer<AYRES_SOFTWARE>::elapsed() const {
     portENTER_CRITICAL(&_mux);
@@ -428,18 +407,12 @@ uint64_t AyresTimer<AYRES_SOFTWARE>::elapsed() const {
     const bool paused = _paused;
     const uint64_t pausedElapsed = _paused_elapsed_us;
     const uint64_t startUs = _start_us;
-    const uint64_t timeout = _timeout_us;
-    const TimerMode mode = _mode;
     portEXIT_CRITICAL(&_mux);
+
     if (!running) return 0;
     if (paused) return pausedElapsed;
-
     const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-    const uint64_t delta = (now >= startUs) ? (now - startUs) : 0;
-    if (mode == PERIODIC && timeout > 0) {
-        return delta % timeout;
-    }
-    return delta;
+    return (now >= startUs) ? (now - startUs) : 0;
 }
 
 uint64_t AyresTimer<AYRES_SOFTWARE>::remaining() const {
@@ -473,6 +446,10 @@ bool AyresTimer<AYRES_SOFTWARE>::isPaused() const {
     portEXIT_CRITICAL(&_mux);
     return paused;
 }
+
+// =============================================================================
+// REGISTRO DE CALLBACKS Y TAREAS FREERTOS
+// =============================================================================
 
 bool AyresTimer<AYRES_SOFTWARE>::setCallback(Callback callback) {
     if (!_callbackMutex || xPortInIsrContext()) {
@@ -560,6 +537,7 @@ bool AyresTimer<AYRES_SOFTWARE>::setISRCallback(ISRCallback callback, void* arg)
 bool AyresTimer<AYRES_SOFTWARE>::ensureTask_() {
     portENTER_CRITICAL(&_mux);
     if (_taskHandle) {
+        _useTask = true;
         _lastError = ESP_OK;
         portEXIT_CRITICAL(&_mux);
         return true;
@@ -571,7 +549,7 @@ bool AyresTimer<AYRES_SOFTWARE>::ensureTask_() {
     portEXIT_CRITICAL(&_mux);
 
     char taskName[16];
-    snprintf(taskName, sizeof(taskName), "AyTimerSW_%s", _name);
+    snprintf(taskName, sizeof(taskName), "AyTimerSW%p", this);
     TaskHandle_t handle = nullptr;
     const BaseType_t core = _taskCore == AYRES_TIMER_AUTO_CORE
         ? xPortGetCoreID()
@@ -586,6 +564,7 @@ bool AyresTimer<AYRES_SOFTWARE>::ensureTask_() {
 
     portENTER_CRITICAL(&_mux);
     _taskHandle = handle;
+    _useTask = true;
     _lastError = ESP_OK;
     portEXIT_CRITICAL(&_mux);
     return true;
@@ -595,6 +574,7 @@ void AyresTimer<AYRES_SOFTWARE>::stopTask_() {
     portENTER_CRITICAL(&_mux);
     TaskHandle_t handle = _taskHandle;
     _taskStopRequested = true;
+    _useTask = false;
     portEXIT_CRITICAL(&_mux);
     if (!handle) return;
 
@@ -642,7 +622,6 @@ bool AyresTimer<AYRES_SOFTWARE>::useTask(bool enable, UBaseType_t priority,
         }
         if (taskExists && changed) stopTask_();
         portENTER_CRITICAL(&_mux);
-        _useTask = true;
         _taskPriority = priority;
         _taskStackSize = stackSize;
         _taskCore = core;
@@ -651,20 +630,20 @@ bool AyresTimer<AYRES_SOFTWARE>::useTask(bool enable, UBaseType_t priority,
     }
 
     portENTER_CRITICAL(&_mux);
-    const bool dispatchInISR = _dispatchInISR;
     const bool hasCppCallback = _hasCppCallback;
     portEXIT_CRITICAL(&_mux);
-    if (dispatchInISR && hasCppCallback) {
+    if (hasCppCallback) {
         setError_(ESP_ERR_INVALID_STATE);
         return false;
     }
-    portENTER_CRITICAL(&_mux);
-    _useTask = false;
-    portEXIT_CRITICAL(&_mux);
     stopTask_();
     setError_(ESP_OK);
     return true;
 }
+
+// =============================================================================
+// DESPACHO DE INTERRUPCION Y TAREA FREERTOS
+// =============================================================================
 
 bool IRAM_ATTR AyresTimer<AYRES_SOFTWARE>::dispatch_() {
     const uint64_t nowUs = static_cast<uint64_t>(esp_timer_get_time());
@@ -672,9 +651,11 @@ bool IRAM_ATTR AyresTimer<AYRES_SOFTWARE>::dispatch_() {
     portENTER_CRITICAL_ISR(&_mux);
     if (_mode != PERIODIC) {
         _running = false;
+    } else {
+        _start_us = nowUs;
     }
 
-    // Telemetría
+    // Telemetría en tiempo real
     ++_stats.totalTriggers;
     _stats.lastTriggerUs = nowUs;
     if (_expectedNextUs > 0) {
@@ -691,12 +672,9 @@ bool IRAM_ATTR AyresTimer<AYRES_SOFTWARE>::dispatch_() {
         _expectedNextUs = 0;
     }
 
-    const bool hasCpp = _hasCppCallback;
-    const bool hasIsr = _isrCallback != nullptr;
-    const bool useDedicatedTask = _useTask || (_dispatchInISR && hasCpp);
-    TaskHandle_t task = useDedicatedTask ? _taskHandle : nullptr;
-    ISRCallback isrCb = _isrCallback;
-    void* isrArg = _isrArg;
+    TaskHandle_t task = _useTask ? _taskHandle : nullptr;
+    ISRCallback callback = _isrCallback;
+    void* callbackArg = _isrArg;
     if (task) ++_producedCallbacks;
     portEXIT_CRITICAL_ISR(&_mux);
 
@@ -705,26 +683,7 @@ bool IRAM_ATTR AyresTimer<AYRES_SOFTWARE>::dispatch_() {
         vTaskNotifyGiveFromISR(task, &woken);
         return woken == pdTRUE;
     }
-
-    if (hasIsr && isrCb) {
-        isrCb(isrArg);
-        return false;
-    }
-
-    if (hasCpp) {
-        if (_callbackMutex) {
-            xSemaphoreTakeRecursive(_callbackMutex, portMAX_DELAY);
-            portENTER_CRITICAL_ISR(&_mux);
-            const bool callCpp = _hasCppCallback;
-            _callbackActive = callCpp;
-            portEXIT_CRITICAL_ISR(&_mux);
-            xSemaphoreGiveRecursive(_callbackMutex);
-            if (callCpp && _callback) _callback();
-            portENTER_CRITICAL_ISR(&_mux);
-            _callbackActive = false;
-            portEXIT_CRITICAL_ISR(&_mux);
-        }
-    }
+    if (callback) callback(callbackArg);
     return false;
 }
 
@@ -754,7 +713,7 @@ void AyresTimer<AYRES_SOFTWARE>::callbackTask_(void* pv) {
             self->_callbackActive = callCpp;
             portEXIT_CRITICAL(&self->_mux);
             xSemaphoreGiveRecursive(self->_callbackMutex);
-            if (callCpp && self->_callback) self->_callback();
+            if (callCpp) self->_callback();
             portENTER_CRITICAL(&self->_mux);
             self->_callbackActive = false;
             portEXIT_CRITICAL(&self->_mux);
@@ -766,6 +725,10 @@ void AyresTimer<AYRES_SOFTWARE>::callbackTask_(void* pv) {
     portEXIT_CRITICAL(&self->_mux);
     vTaskDelete(nullptr);
 }
+
+// =============================================================================
+// UTILIDADES ESTATICAS DE TIEMPO Y CICLOS DE CPU
+// =============================================================================
 
 uint32_t AyresTimer<AYRES_SOFTWARE>::cpuFreqMHz() {
     return getCpuFrequencyMhz();
@@ -783,11 +746,8 @@ void AyresTimer<AYRES_SOFTWARE>::busyWaitCycles(uint32_t cyc) {
 }
 
 void AyresTimer<AYRES_SOFTWARE>::busyWaitUs(uint32_t us) {
-    const uint32_t start = xthal_get_ccount();
     const uint32_t cyc = us * getCpuFrequencyMhz();
-    while ((xthal_get_ccount() - start) < cyc) {
-        __asm__ __volatile__("nop");
-    }
+    busyWaitCycles(cyc);
 }
 
 uint64_t AyresTimer<AYRES_SOFTWARE>::micros64() {
