@@ -55,6 +55,20 @@
 
 ---
 
+## ⏱️ Supported Time Units
+
+The library provides symmetrical and native convenience methods across both Hardware (`AyresTimerHW`) and Software (`AyresTimerSW`) backends, spanning from nanoseconds to days of uptime:
+
+| Unit | Available Methods | Resolution / Precision | Usage Example |
+| :--- | :--- | :--- | :--- |
+| **Seconds (`s`)** | `startSec()`, `oneShotSec()`, `periodicSec()`, `retriggerableSec()` | 1 second | `timer.periodicSec(5);` (every 5s) |
+| **Milliseconds (`ms`)** | `startMs()`, `oneShotMs()`, `periodicMs()`, `retriggerableMs()`, `remainingMs()`, `elapsedMs()` | 1 millisecond | `timer.oneShotMs(1500);` (1.5s delay) |
+| **Microseconds (`µs`)** | `start()`, `oneShot()`, `periodic()`, `retriggerable()`, `updatePeriod()`, `remaining()`, `elapsed()` | **1 microsecond (`uint64_t`)** | `timer.periodic(250000);` (250 ms) |
+| **Nanoseconds (`ns`)** | **HW:** Silicon APB bus at 80 MHz with prescaler / **SW:** `AyresTimerSW::busyWaitCycles()` | **4.16 ns to 12.5 ns** | `AyresTimerSW::busyWaitCycles(100);` |
+| **CPU Cycles** | `AyresTimerSW::cycles()`, `AyresTimerSW::cpuFreqMHz()` | 1 Xtensa clock cycle | `uint32_t c = AyresTimerSW::cycles();` |
+
+---
+
 ## 🚀 Installation
 
 ### PlatformIO

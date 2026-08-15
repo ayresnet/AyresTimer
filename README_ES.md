@@ -55,6 +55,20 @@
 
 ---
 
+## ⏱️ Unidades de Tiempo Soportadas
+
+La librería cuenta con métodos nativos directos y simétricos tanto para Hardware (`AyresTimerHW`) como para Software (`AyresTimerSW`), cubriendo desde nanosegundos hasta horas de ejecución:
+
+| Unidad | Métodos Disponibles | Resolución / Precisión | Ejemplo de Uso |
+| :--- | :--- | :--- | :--- |
+| **Segundos (`s`)** | `startSec()`, `oneShotSec()`, `periodicSec()`, `retriggerableSec()` | 1 segundo | `timer.periodicSec(5);` (cada 5 seg) |
+| **Milisegundos (`ms`)** | `startMs()`, `oneShotMs()`, `periodicMs()`, `retriggerableMs()`, `remainingMs()`, `elapsedMs()` | 1 milisegundo | `timer.oneShotMs(1500);` (1.5 seg) |
+| **Microsegundos (`µs`)** | `start()`, `oneShot()`, `periodic()`, `retriggerable()`, `updatePeriod()`, `remaining()`, `elapsed()` | **1 microsegundo (`uint64_t`)** | `timer.periodic(250000);` (250 ms) |
+| **Nanosegundos (`ns`)** | **HW:** Bus APB de silicio a 80 MHz con prescaler / **SW:** `AyresTimerSW::busyWaitCycles()` | **4.16 ns a 12.5 ns** | `AyresTimerSW::busyWaitCycles(100);` |
+| **Ciclos de CPU** | `AyresTimerSW::cycles()`, `AyresTimerSW::cpuFreqMHz()` | 1 ciclo de reloj Xtensa | `uint32_t c = AyresTimerSW::cycles();` |
+
+---
+
 ## 🚀 Instalación
 
 ### PlatformIO
