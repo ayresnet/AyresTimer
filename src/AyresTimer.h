@@ -1,7 +1,7 @@
 /*
  * =============================================================================
  * AyresTimer v4.1.0 - Suite Profesional de Temporización para ESP32
- * Desarrollado por AyresNet (https://ayresnet.com)
+ * Desarrollado y mantenido por Daniel Cristian Salgado - AyresNet (https://ayresnet.com)
  * =============================================================================
  *
  * Esta librería proporciona un sistema integral de temporizadores de 64 bits

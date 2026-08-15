@@ -1,7 +1,7 @@
 /*
  * =============================================================================
  * AyresTimer v4.1.0 - Backend de Hardware (Bare-Metal Silicon Register Direct Access)
- * Desarrollado por AyresNet (https://ayresnet.com)
+ * Desarrollado y mantenido por Daniel Cristian Salgado - AyresNet (https://ayresnet.com)
  * =============================================================================
  *
  * ARQUITECTURA DE HARDWARE (TIMER GROUPS TG0 / TG1):

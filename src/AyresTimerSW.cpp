@@ -1,7 +1,7 @@
 /*
  * =============================================================================
  * AyresTimer v4.1.0 - Backend de Software (ESP-IDF High Resolution Timer / esp_timer)
- * Desarrollado por AyresNet (https://ayresnet.com)
+ * Desarrollado y mantenido por Daniel Cristian Salgado - AyresNet (https://ayresnet.com)
  * =============================================================================
  *
  * ARQUITECTURA DE SOFTWARE (esp_timer / 64-bit High Resolution Timer):

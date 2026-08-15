@@ -1,7 +1,7 @@
 {
   "name": "AyresTimer",
   "version": "4.1.0",
-  "description": "Professional mission-critical 64-bit Hardware and Software Timer suite for ESP32 by AyresNet. Features 64-bit microsecond resolution, silicon Timer Groups (TG0/TG1), high-resolution esp_timer engine, thread-safe FreeRTOS task callback dispatching, real-time jitter telemetry, pause/resume state control, and zero-overhead lightweight timeout and stopwatch modules.",
+  "description": "Professional mission-critical 64-bit Hardware and Software Timer suite for ESP32 by Daniel Cristian Salgado (AyresNet). Features 64-bit microsecond resolution, silicon Timer Groups (TG0/TG1), high-resolution esp_timer engine, thread-safe FreeRTOS task callback dispatching, real-time jitter telemetry, pause/resume state control, and zero-overhead lightweight timeout and stopwatch modules.",
   "keywords": [
     "timer",
     "esp32",
@@ -18,7 +18,7 @@
   ],
   "authors": [
     {
-      "name": "AyresNet",
+      "name": "Daniel Cristian Salgado (AyresNet)",
       "url": "https://ayresnet.com",
       "maintainer": true
     }

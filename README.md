@@ -1,6 +1,6 @@
 # AyresTimer ⏱️🚀
-> **Professional, Mission-Critical 64-bit Hardware & Software Timer Suite for ESP32**
-> *Developed by [AyresNet](https://ayresnet.com) — [GitHub Profile](https://github.com/ayresnet)*
+> **Professional 64-bit Hardware and Software Timer Suite for ESP32**
+> *Developed and maintained by **Daniel Cristian Salgado** ([AyresNet](https://ayresnet.com)) — [GitHub Profile](https://github.com/ayresnet)*
 
 [![Language: English](https://img.shields.io/badge/Language-English-blue.svg)](#)
 [![Leer en Español](https://img.shields.io/badge/Documentaci%C3%B3n-Espa%C3%B1ol-yellow.svg)](README_ES.md)
@@ -206,9 +206,11 @@ All examples include dual implementation for **PlatformIO (`main.cpp`)** and **A
 ---
 
 ## 👨‍💻 Author & Maintainer
-* **AyresNet**
-* Website: [https://ayresnet.com](https://ayresnet.com)
-* GitHub: [@ayresnet](https://github.com/ayresnet)
+* **Author & Maintainer:** **Daniel Cristian Salgado** ([AyresNet](https://ayresnet.com))
+* **Organization:** [AyresNet](https://ayresnet.com)
+* **Official Website:** [https://ayresnet.com](https://ayresnet.com)
+* **GitHub Profile:** [@ayresnet](https://github.com/ayresnet)
+* **Project Repository:** [https://github.com/ayresnet/AyresTimer](https://github.com/ayresnet/AyresTimer)
 
 ---
 
